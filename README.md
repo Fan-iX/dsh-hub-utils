@@ -55,6 +55,7 @@ cookies attached automatically:
 |---|---|---|---|
 | `GET /hub/api/keepalive` | dsh-hub | — | `{"keepAlive":boolean,"running":boolean}` |
 | `POST /hub/api/keepalive` | dsh-hub | `{"keepAlive":boolean}`, `content-type: application/json` | the same JSON |
+| `GET /hub/api/session` | dsh-hub | — | `{"authenticated":true,"user":...,"expiresInSec":N}` |
 | `POST /dsh-hub-utils/quit` | this package | header `x-dsh-hub-utils: quit` | `{"ok":true}` |
 
 The keep-alive route requires an authenticated hub session; the JSON content
@@ -66,6 +67,16 @@ The quit route applies dsh's own browser fence through `ctx.connection.admit`
 (plugin routes are not fenced automatically), requires a `POST` carrying the
 custom header (which a cross-site form cannot set), and hands the exit to the
 launcher's `appExit` after the response has flushed.
+
+### Session expiry
+
+`GET /hub/api/session` reports the live session's remaining TTL
+(`expiresInSec`). The plugin probes it on load and on tab activation
+(`visibilitychange`, a `pageshow` from the bfcache, `focus`), then keeps one
+timer at that deadline; at expiry it reloads the page, which the hub answers with
+the login redirect. A hidden tab waits for the visibility probe. There is no
+fetch wrapping and no periodic polling, and the watcher never reads dsh's UI,
+state, or error messages.
 
 ## What the browser half needs
 

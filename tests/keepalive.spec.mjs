@@ -505,3 +505,232 @@ test('a failed quit closes the dialog and offers retry', async () => {
   assert.match(text(render()), /quitFailed/)
   assert.ok(button(render(), 'retry'))
 })
+
+// --- the session watcher ----------------------------------------------------
+
+/** A fetch-shaped response for the session probe. */
+const response = (overrides = {}) => ({
+  status: 200,
+  ok: true,
+  headers: { get: () => null },
+  redirected: false,
+  url: '',
+  json: async () => ({ expiresInSec: 3600 }),
+  ...overrides,
+})
+
+/** Flush the watcher's promise chain without waiting on a timer. */
+const flush = async () => {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+}
+
+/** Capture the watcher's deadline timer instead of waiting an hour. */
+const captureTimers = () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout }
+  const timers = []
+  const cleared = []
+  globalThis.setTimeout = (fn, ms) => {
+    timers.push({ fn, ms, id: timers.length })
+    return timers.length - 1
+  }
+  globalThis.clearTimeout = (id) => { cleared.push(id) }
+  return {
+    timers,
+    cleared,
+    restore: () => {
+      globalThis.setTimeout = original.setTimeout
+      globalThis.clearTimeout = original.clearTimeout
+    },
+  }
+}
+
+/**
+ * Install the watcher over a controllable window/document.
+ * @param options.fetch - the fetch implementation.
+ * @param options.pathname - the page path.
+ * @param options.document - an optional document stub; omitted means no document.
+ */
+const watch = ({ fetch, pathname = '/', document: doc } = {}) => {
+  const redirects = []
+  const reloads = []
+  const listeners = {}
+  const documentListeners = {}
+  const previous = { window: globalThis.window, document: globalThis.document }
+  globalThis.window = {
+    fetch,
+    location: {
+      pathname,
+      assign: (to) => { redirects.push(to) },
+      reload: () => { reloads.push(true) },
+    },
+    addEventListener: (name, fn) => { listeners[name] = fn },
+    removeEventListener: (name) => { delete listeners[name] },
+  }
+  if (doc !== undefined) {
+    globalThis.document = {
+      visibilityState: doc.visibilityState ?? 'visible',
+      addEventListener: (name, fn) => { documentListeners[name] = fn },
+      removeEventListener: (name) => { delete documentListeners[name] },
+    }
+  } else {
+    delete globalThis.document
+  }
+  const face = registration.factory(stubRequire)
+  const nativeFetch = globalThis.window.fetch
+  const stop = face.startSessionWatch()
+  return {
+    redirects,
+    reloads,
+    listeners,
+    documentListeners,
+    nativeFetch,
+    stop: () => {
+      stop()
+      globalThis.window = previous.window
+      globalThis.document = previous.document
+    },
+  }
+}
+
+test('the session watcher does not wrap fetch', async () => {
+  const native = async () => response({ status: 401, ok: false })
+  const seen = watch({ fetch: native })
+  try {
+    await flush()
+    assert.equal(globalThis.window.fetch, native)
+    assert.deepEqual(seen.redirects, ['/hub/login'])
+  } finally {
+    seen.stop()
+  }
+})
+
+test('a live session schedules the deadline from expiresInSec', async () => {
+  const timers = captureTimers()
+  const seen = watch({ fetch: async () => response() })
+  try {
+    await flush()
+    assert.equal(seen.redirects.length, 0)
+    assert.equal(timers.timers.length, 1)
+    assert.equal(timers.timers[0].ms, 3600 * 1000 + 2000, 'the margin covers the cookie/server skew')
+  } finally {
+    seen.stop()
+    timers.restore()
+  }
+})
+
+test('the deadline timer reloads the page', async () => {
+  const timers = captureTimers()
+  const seen = watch({ fetch: async () => response() })
+  try {
+    await flush()
+    timers.timers[0].fn()
+    assert.deepEqual(seen.reloads, [true])
+  } finally {
+    seen.stop()
+    timers.restore()
+  }
+})
+
+test('a hidden tab waits for the visibility probe instead of reloading', async () => {
+  const timers = captureTimers()
+  let status = 200
+  const seen = watch({
+    fetch: async () => response({ status, ok: status === 200 }),
+    document: { visibilityState: 'hidden' },
+  })
+  try {
+    await flush()
+    timers.timers[0].fn()
+    assert.deepEqual(seen.reloads, [])
+
+    status = 401
+    globalThis.document.visibilityState = 'visible'
+    seen.documentListeners.visibilitychange()
+    await flush()
+    assert.deepEqual(seen.redirects, ['/hub/login'])
+  } finally {
+    seen.stop()
+    timers.restore()
+  }
+})
+
+test('visibilitychange probes only when the tab becomes visible', async () => {
+  const timers = captureTimers()
+  let calls = 0
+  const seen = watch({
+    fetch: async () => { calls += 1; return response() },
+    document: { visibilityState: 'hidden' },
+  })
+  try {
+    await flush()
+    assert.equal(calls, 1, 'the load probe')
+    seen.documentListeners.visibilitychange()
+    await flush()
+    assert.equal(calls, 1, 'a hidden tab skips the probe')
+    globalThis.document.visibilityState = 'visible'
+    seen.documentListeners.visibilitychange()
+    await flush()
+    assert.equal(calls, 2)
+  } finally {
+    seen.stop()
+    timers.restore()
+  }
+})
+
+test('focus and a bfcache restore re-probe, a normal pageshow does not', async () => {
+  const timers = captureTimers()
+  let calls = 0
+  const seen = watch({ fetch: async () => { calls += 1; return response() } })
+  try {
+    await flush()
+    assert.equal(calls, 1)
+    seen.listeners.pageshow({ persisted: false })
+    await flush()
+    assert.equal(calls, 1)
+    seen.listeners.pageshow({ persisted: true })
+    await flush()
+    assert.equal(calls, 2)
+    seen.listeners.focus()
+    await flush()
+    assert.equal(calls, 3)
+  } finally {
+    seen.stop()
+    timers.restore()
+  }
+})
+
+test('an already-expired session redirects instead of scheduling', async () => {
+  const seen = watch({ fetch: async () => response({ json: async () => ({ expiresInSec: 0 }) }) })
+  try {
+    await flush()
+    assert.deepEqual(seen.redirects, ['/hub/login'])
+  } finally {
+    seen.stop()
+  }
+})
+
+test('the session watcher does not redirect a page already on the login screen', async () => {
+  const seen = watch({ pathname: '/hub/login', fetch: async () => response({ status: 401, ok: false }) })
+  try {
+    await flush()
+    assert.deepEqual(seen.redirects, [])
+  } finally {
+    seen.stop()
+  }
+})
+
+test('disposing the session watcher clears the timer and the listeners', async () => {
+  const timers = captureTimers()
+  const native = async () => response()
+  const seen = watch({ fetch: native })
+  try {
+    await flush()
+    assert.equal(globalThis.window.fetch, native)
+    seen.stop()
+    assert.deepEqual(timers.cleared, [0])
+    assert.equal(seen.listeners.focus, undefined)
+    assert.equal(seen.documentListeners.visibilitychange, undefined)
+  } finally {
+    timers.restore()
+  }
+})

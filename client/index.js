@@ -31,8 +31,16 @@ window.__ModuleLoader__.load({
     /** Dictionary namespace owned by this browser half. */
     var NS = 'settings.dshHubUtils'
 
-    /** The hub route behind the keep-alive switch; see dsh-hub's src/keepalive.mjs. */
+    /** The hub route behind the keep-alive switch; see dsh-hub's backend/web.mjs. */
     var KEEPALIVE_PATH = '/hub/api/keepalive'
+
+    /**
+     * Session-expiry watcher: probe for the server's remaining TTL, then keep
+     * one timer at that deadline; tab activation re-probes. See startSessionWatch.
+     */
+    var SESSION_PATH = '/hub/api/session'
+    var LOGIN_PATH = '/hub/login'
+    var EXPIRY_MARGIN_MS = 2000
 
     /** The host half's quit route and its required header; see `src/index.js`. */
     var QUIT_PATH = '/dsh-hub-utils/quit'
@@ -349,11 +357,111 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Refresh into the login page when the hub session expires.
+     *
+     * The hub answers a non-document request without a session with 401, and
+     * `GET /hub/api/session` reports the remaining TTL for a live one. This
+     * watcher probes on load and on tab activation (`visibilitychange`,
+     * `pageshow` after bfcache, `focus`), and schedules one timer for the
+     * reported deadline so a session expiring mid-use reloads the page (the hub
+     * then sends it to `/hub/login`). It does not wrap fetch or read dsh's UI,
+     * state, or error messages.
+     * @returns a disposer that clears the timer and removes the listeners.
+     */
+    function startSessionWatch() {
+      var w = typeof window !== 'undefined' ? window : null
+      if (w === null || typeof w.fetch !== 'function') return function () {}
+      var stopped = false
+      var timer = null
+
+      var redirect = function () {
+        if (stopped) return
+        var location = w.location
+        if (!location || typeof location.assign !== 'function') return
+        if (location.pathname === LOGIN_PATH) return
+        stopped = true
+        location.assign(LOGIN_PATH)
+      }
+
+      var reload = function () {
+        var location = w.location
+        if (location && typeof location.reload === 'function') { location.reload(); return }
+        redirect()
+      }
+
+      var schedule = function (remainingSec) {
+        if (timer !== null) { clearTimeout(timer); timer = null }
+        var delay = Math.max(0, remainingSec * 1000 + EXPIRY_MARGIN_MS)
+        timer = setTimeout(function () {
+          timer = null
+          if (stopped) return
+          // A hidden tab may have been throttled; the visibility probe decides.
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+          reload()
+        }, delay)
+      }
+
+      var check = function () {
+        if (stopped) return undefined
+        return w.fetch(SESSION_PATH, { cache: 'no-store', headers: { accept: 'application/json' } })
+          .then(function (response) {
+            if (response.status === 401) { redirect(); return }
+            // A hub older than this plugin redirects the probe instead of
+            // answering 401; the followed URL is the login page.
+            if (response.redirected && /\/hub\/login(?:[?#]|$)/.test(String(response.url ?? ''))) {
+              redirect()
+              return
+            }
+            if (!response.ok) return
+            return response.json().then(function (body) {
+              if (stopped) return
+              var remaining = Number(body && body.expiresInSec)
+              if (!Number.isFinite(remaining) || remaining <= 0) { redirect(); return }
+              schedule(remaining)
+            })
+          })
+          .catch(function () { /* hub unreachable: leave the page alone */ })
+      }
+
+      var onVisible = function () {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+        check()
+      }
+      var onShow = function (event) {
+        // A normal load already probed; only a bfcache restore needs this.
+        if (event && event.persisted === true) check()
+      }
+      var onFocus = function () { check() }
+      if (typeof w.addEventListener === 'function') {
+        w.addEventListener('focus', onFocus)
+        w.addEventListener('pageshow', onShow)
+      }
+      if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', onVisible)
+      }
+
+      check()
+
+      return function dispose() {
+        stopped = true
+        if (timer !== null) { clearTimeout(timer); timer = null }
+        if (typeof w.removeEventListener === 'function') {
+          w.removeEventListener('focus', onFocus)
+          w.removeEventListener('pageshow', onShow)
+        }
+        if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+          document.removeEventListener('visibilitychange', onVisible)
+        }
+      }
+    }
+
+    /**
      * Mount the sidebar action and its dictionaries, but only under dsh-hub.
      * @param ctx - the browser plugin context.
      */
     function apply(ctx) {
       if (!isDshHub()) return
+      ctx.effect(startSessionWatch, 'dsh-hub-utils: session watch')
       ctx.effect(installStyles, 'dsh-hub-utils: styles')
       ctx.effect(function () { return ctx.locale.register(NS, { en: en, zh: zh }) }, 'dsh-hub-utils: dictionaries')
       ctx.effect(function () {
@@ -371,6 +479,9 @@ window.__ModuleLoader__.load({
     exports.KEEPALIVE_PATH = KEEPALIVE_PATH
     exports.QUIT_PATH = QUIT_PATH
     exports.QUIT_HEADER = QUIT_HEADER
+    exports.SESSION_PATH = SESSION_PATH
+    exports.LOGIN_PATH = LOGIN_PATH
+    exports.startSessionWatch = startSessionWatch
     exports.apply = apply
     exports.inject = ['slots', 'locale']
     return module.exports
