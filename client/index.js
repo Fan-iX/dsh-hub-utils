@@ -52,6 +52,19 @@ window.__ModuleLoader__.load({
     /** How long the quit confirmation waits before dismissing itself untouched. */
     var CONFIRM_WINDOW_MS = 5000
 
+    /**
+     * Tab badge: an attention dot (warning over done) and a larger neutral
+     * running ring, drawn over the page's existing favicon.
+     */
+    var FAVICON_SELECTOR = 'link[rel~="icon"]'
+    var FAVICON_BASE_ATTR = 'data-dsh-hub-favicon'
+    var FAVICON_SIZE = 64
+    var FAVICON_X = 48
+    var FAVICON_Y = 48
+    var FAVICON_RING_RADIUS = 17
+    var FAVICON_DOT_RADIUS = 10
+    var FAVICON_FALLBACK = { warning: '#f59e0b', done: '#22c55e', running: '#9ca3af' }
+
     var stack = { display: 'flex', flexDirection: 'column', gap: '20px' }
     var section = { display: 'flex', flexDirection: 'column', gap: '10px' }
     var row = { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }
@@ -129,6 +142,167 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Reduce the per-session status snapshot to the tab badge's state.
+     *
+     * Attention is competing (a pending interaction outranks an unread
+     * completion); running is independent, so the badge can carry both.
+     * @param snapshot - the `useSessionStatus` snapshot.
+     * @returns `''`, `'running'`, `'warning'`, `'done'`, or `<attention>+running`.
+     */
+    function deriveActivity(snapshot) {
+      if (snapshot === null || snapshot === undefined || typeof snapshot.forEach !== 'function') return ''
+      var warning = false
+      var done = false
+      var running = false
+      snapshot.forEach(function (status) {
+        if (status === null || status === undefined) return
+        if (status.pendingInteraction !== undefined && status.pendingInteraction !== null) warning = true
+        if (status.completionUnread === true) done = true
+        if (status.running === true) running = true
+      })
+      var attention = warning ? 'warning' : done ? 'done' : ''
+      if (attention === '') return running ? 'running' : ''
+      return running ? attention + '+running' : attention
+    }
+
+    /** Read a theme token for canvas painting, or use the palette fallback. */
+    function faviconColor(doc, name, fallback) {
+      try {
+        var view = doc.defaultView
+        if (view && typeof view.getComputedStyle === 'function' && doc.body) {
+          var value = view.getComputedStyle(doc.body).getPropertyValue(name).trim()
+          if (value !== '') return value
+        }
+      } catch (err) {
+        // A document without a styled body falls back to the palette constant.
+      }
+      return fallback
+    }
+
+    /** Base favicon hrefs remembered per link, so the badge can be removed. */
+    var faviconImages = {}
+
+    /** The original href of one icon link, remembered once. */
+    function faviconBase(link) {
+      var base = link.getAttribute(FAVICON_BASE_ATTR)
+      if (base === null || base === '') {
+        base = link.getAttribute('href')
+        if (base === null || base === '') return null
+        link.setAttribute(FAVICON_BASE_ATTR, base)
+      }
+      return base
+    }
+
+    /** Load and cache one base favicon; `onLoad` runs once it is usable. */
+    function faviconImage(base, win, onLoad) {
+      var entry = faviconImages[base]
+      if (entry === undefined) {
+        var Ctor = win && win.Image
+        if (typeof Ctor !== 'function') return { ready: false, failed: true, img: null }
+        var img = new Ctor()
+        entry = { img: img, ready: false, failed: false, waiters: [] }
+        img.onload = function () {
+          entry.ready = true
+          var waiters = entry.waiters
+          entry.waiters = []
+          waiters.forEach(function (fn) { fn() })
+        }
+        img.onerror = function () {
+          entry.failed = true
+          var waiters = entry.waiters
+          entry.waiters = []
+          waiters.forEach(function (fn) { fn() })
+        }
+        img.src = base
+        faviconImages[base] = entry
+      }
+      if (!entry.ready && !entry.failed) entry.waiters.push(onLoad)
+      return entry
+    }
+
+    /**
+     * Paint the tab badge over every `<link rel="icon">`.
+     * @param activity - the value from {@link deriveActivity}; `''` restores.
+     * @param doc - the document to update (defaults to the page's).
+     * @param win - the window whose `Image` loads the base (defaults to the page's).
+     */
+    function paintFavicon(activity, doc, win) {
+      var d = doc || (typeof document !== 'undefined' ? document : null)
+      if (d === null || typeof d.querySelectorAll !== 'function') return
+      var w = win || (typeof window !== 'undefined' ? window : null)
+      faviconActivity = activity
+      faviconGeneration += 1
+      var generation = faviconGeneration
+      var links = d.querySelectorAll(FAVICON_SELECTOR)
+      for (var i = 0; i < links.length; i += 1) {
+        var link = links[i]
+        var base = faviconBase(link)
+        if (base === null) continue
+        if (activity === '') {
+          link.setAttribute('href', base)
+          continue
+        }
+        paintFaviconLink(d, w, link, base, activity, generation)
+      }
+    }
+
+    /** Current badge state and paint generation, used to drop stale image loads. */
+    var faviconActivity = ''
+    var faviconGeneration = 0
+
+    /** Draw one link's badge, waiting for its base image when necessary. */
+    function paintFaviconLink(doc, win, link, base, activity, generation) {
+      var entry = faviconImage(base, win, function () {
+        if (generation === faviconGeneration) paintFaviconLink(doc, win, link, base, activity, generation)
+      })
+      if (!entry.ready && !entry.failed) return
+      if (typeof doc.createElement !== 'function') return
+      var canvas = doc.createElement('canvas')
+      if (canvas === null || typeof canvas.getContext !== 'function') return
+      canvas.width = FAVICON_SIZE
+      canvas.height = FAVICON_SIZE
+      var ctx = canvas.getContext('2d')
+      if (ctx === null || ctx === undefined) return
+      ctx.clearRect(0, 0, FAVICON_SIZE, FAVICON_SIZE)
+      if (!entry.failed && entry.img !== null) ctx.drawImage(entry.img, 0, 0, FAVICON_SIZE, FAVICON_SIZE)
+      var attention = activity.indexOf('warning') === 0 ? 'warning'
+        : activity.indexOf('done') === 0 ? 'done' : ''
+      if (activity.indexOf('running') !== -1) {
+        drawFaviconRing(ctx, faviconColor(doc, '--dsw-alias-label-tertiary', FAVICON_FALLBACK.running))
+      }
+      if (attention !== '') {
+        var token = attention === 'warning' ? '--dsw-alias-state-warn-primary' : '--dsw-alias-state-success-primary'
+        drawFaviconDot(ctx, faviconColor(doc, token, FAVICON_FALLBACK[attention]))
+      }
+      link.setAttribute('href', canvas.toDataURL('image/png'))
+    }
+
+    /** A neutral outline ring, slightly larger than the attention dot. */
+    function drawFaviconRing(ctx, color) {
+      ctx.beginPath()
+      ctx.arc(FAVICON_X, FAVICON_Y, FAVICON_RING_RADIUS, 0, Math.PI * 2)
+      ctx.lineWidth = 7
+      ctx.strokeStyle = '#fff'
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.arc(FAVICON_X, FAVICON_Y, FAVICON_RING_RADIUS, 0, Math.PI * 2)
+      ctx.lineWidth = 4
+      ctx.strokeStyle = color
+      ctx.stroke()
+    }
+
+    /** The attention dot: amber for a pending interaction, green for an unread completion. */
+    function drawFaviconDot(ctx, color) {
+      ctx.beginPath()
+      ctx.arc(FAVICON_X, FAVICON_Y, FAVICON_DOT_RADIUS, 0, Math.PI * 2)
+      ctx.fillStyle = color
+      ctx.fill()
+      ctx.lineWidth = 3
+      ctx.strokeStyle = '#fff'
+      ctx.stroke()
+    }
+
+    /**
      * The sidebar action and its panel.
      * @param props - the sidebar's column state and the page's copy.
      * @returns the button and, while open, the panel dialog.
@@ -148,6 +322,15 @@ window.__ModuleLoader__.load({
       react.useEffect(function () {
         alive.current = true
         return function () { alive.current = false }
+      }, [])
+
+      // Tab badge: the same SessionStatus snapshot the sidebar uses.
+      var activity = props.useSessionStatus(deriveActivity)
+      react.useEffect(function () {
+        paintFavicon(activity)
+      }, [activity])
+      react.useEffect(function () {
+        return function () { paintFavicon('') }
       }, [])
 
       var update = function (patch) {
@@ -482,6 +665,8 @@ window.__ModuleLoader__.load({
     exports.SESSION_PATH = SESSION_PATH
     exports.LOGIN_PATH = LOGIN_PATH
     exports.startSessionWatch = startSessionWatch
+    exports.deriveActivity = deriveActivity
+    exports.paintFavicon = paintFavicon
     exports.apply = apply
     exports.inject = ['slots', 'locale']
     return module.exports

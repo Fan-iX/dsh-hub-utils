@@ -78,6 +78,22 @@ the login redirect. A hidden tab waits for the visibility probe. There is no
 fetch wrapping and no periodic polling, and the watcher never reads dsh's UI,
 state, or error messages.
 
+### Tab badge
+
+The page favicon mirrors the session status the sidebar shows, read through the
+same `useSessionStatus` snapshot (the sidebar footer action is a root slot, so
+the plugin already receives that seat):
+
+- a pending interaction (approval, plan review, question) paints an amber dot;
+- an unread completion paints a green dot; the two compete, and a pending
+  interaction wins;
+- any running session paints a larger neutral ring around the badge; the ring
+  and the dot can show together.
+
+The badge is painted over the existing light/dark favicon (both links are
+updated) and the original href is restored when nothing needs attention. It
+updates from the subscription, with no polling.
+
 ## What the browser half needs
 
 The bundle is hand-written in the runtime's dynamic-bundle format

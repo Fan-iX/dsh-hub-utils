@@ -220,7 +220,7 @@ const mountAction = (initial) => {
       register: (options, value) => { component = value; return () => {} },
     },
   })
-  return { component, hooks, render: (props = {}) => component({ t: (key) => key, wide: true, ...props }) }
+  return { component, hooks, render: (props = {}) => component({ t: (key) => key, wide: true, useSessionStatus: (selector) => selector(new Map()), ...props }) }
 }
 
 /** Visit every element node in a render tree, including a modal's footer prop. */
@@ -733,4 +733,96 @@ test('disposing the session watcher clears the timer and the listeners', async (
   } finally {
     timers.restore()
   }
+})
+
+// --- the tab badge ----------------------------------------------------------
+
+/** One session's status entry. */
+const statusMap = (status) => new Map([['session-1', status]])
+
+test('the tab badge competes warning over done and carries running independently', () => {
+  const face = registration.factory(stubRequire)
+  assert.equal(face.deriveActivity(new Map()), '')
+  assert.equal(face.deriveActivity(statusMap({ running: true })), 'running')
+  assert.equal(face.deriveActivity(statusMap({ completionUnread: true, running: false })), 'done')
+  assert.equal(face.deriveActivity(statusMap({ pendingInteraction: { kind: 'approval' }, running: false })), 'warning')
+  assert.equal(face.deriveActivity(statusMap({ completionUnread: true, running: true })), 'done+running')
+  assert.equal(
+    face.deriveActivity(statusMap({ pendingInteraction: { kind: 'question' }, completionUnread: true, running: true })),
+    'warning+running',
+  )
+  assert.equal(face.deriveActivity(new Map([
+    ['a', { completionUnread: true, running: false }],
+    ['b', { pendingInteraction: { kind: 'plan-review' }, running: false }],
+  ])), 'warning', 'a pending interaction outranks an unread completion')
+})
+
+/** A minimal icon link, canvas and Image for the favicon painter. */
+const makeFaviconPage = () => {
+  const calls = []
+  const link = {
+    attrs: { href: '/favicon.svg' },
+    getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null },
+    setAttribute(name, value) { this.attrs[name] = value },
+  }
+  const ctx = {
+    strokeStyle: '',
+    fillStyle: '',
+    lineWidth: 0,
+    clearRect() { calls.push('clear') },
+    drawImage() { calls.push('image') },
+    beginPath() { calls.push('begin') },
+    arc(x, y, r) { calls.push('arc:' + r) },
+    stroke() { calls.push('stroke:' + this.strokeStyle) },
+    fill() { calls.push('fill:' + this.fillStyle) },
+  }
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ctx,
+    toDataURL: () => 'data:image/png;base64,FAKE',
+  }
+  const doc = {
+    body: {},
+    querySelectorAll: () => [link],
+    createElement: () => canvas,
+  }
+  const win = {
+    Image: class {
+      set src(value) {
+        this._src = value
+        if (typeof this.onload === 'function') this.onload()
+      }
+      get src() { return this._src }
+    },
+  }
+  return { link, calls, doc, win }
+}
+
+test('the tab badge paints the attention dot inside the running ring, then restores', () => {
+  const face = registration.factory(stubRequire)
+  const page = makeFaviconPage()
+  face.paintFavicon('warning+running', page.doc, page.win)
+  assert.equal(page.link.attrs.href, 'data:image/png;base64,FAKE')
+  assert.ok(page.calls.includes('image'), 'the base favicon is drawn first')
+  assert.ok(page.calls.includes('arc:17'), 'the neutral running ring')
+  assert.ok(page.calls.includes('arc:10'), 'the attention dot')
+  assert.ok(page.calls.some((call) => call.startsWith('stroke:')))
+  assert.ok(page.calls.some((call) => call.startsWith('fill:')))
+
+  face.paintFavicon('', page.doc, page.win)
+  assert.equal(page.link.attrs.href, '/favicon.svg')
+})
+
+test('the tab badge shows only the ring for running and only the dot for attention', () => {
+  const face = registration.factory(stubRequire)
+  const running = makeFaviconPage()
+  face.paintFavicon('running', running.doc, running.win)
+  assert.ok(running.calls.includes('arc:17'))
+  assert.ok(!running.calls.includes('arc:10'))
+
+  const done = makeFaviconPage()
+  face.paintFavicon('done', done.doc, done.win)
+  assert.ok(done.calls.includes('arc:10'))
+  assert.ok(!done.calls.includes('arc:17'))
 })
