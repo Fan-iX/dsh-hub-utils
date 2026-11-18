@@ -65,6 +65,29 @@ window.__ModuleLoader__.load({
     var FAVICON_DOT_RADIUS = 10
     var FAVICON_FALLBACK = { warning: '#f59e0b', done: '#22c55e', running: '#9ca3af' }
 
+    /** Per-browser preference for the tab badge. */
+    var BADGE_PREF_KEY = 'dsh-hub-utils.badge'
+
+    /** Read the tab-badge preference; default on when storage is unavailable. */
+    function readBadgePref() {
+      try {
+        if (typeof localStorage === 'undefined') return true
+        return localStorage.getItem(BADGE_PREF_KEY) !== 'off'
+      } catch (err) {
+        return true
+      }
+    }
+
+    /** Persist the tab-badge preference; private mode keeps it for this page only. */
+    function writeBadgePref(enabled) {
+      try {
+        if (typeof localStorage === 'undefined') return
+        localStorage.setItem(BADGE_PREF_KEY, enabled ? 'on' : 'off')
+      } catch (err) {
+        // Storage can be unavailable (private mode); the switch still works now.
+      }
+    }
+
     var stack = { display: 'flex', flexDirection: 'column', gap: '20px' }
     var section = { display: 'flex', flexDirection: 'column', gap: '10px' }
     var row = { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }
@@ -84,6 +107,10 @@ window.__ModuleLoader__.load({
       unsupported: 'Keep-alive is not available on this dsh-hub build.',
       keepFailed: 'Could not read the keep-alive setting.',
       saveFailed: 'Could not save the setting. Try again.',
+      badgeTitle: 'Tab badge',
+      badgeBody: 'Show pending interactions, unread completions, and running sessions on the page icon.',
+      badgeOn: 'The page icon mirrors session status.',
+      badgeOff: 'The page icon stays unchanged.',
       retry: 'Retry',
       quit: 'Quit',
       quitDialogTitle: 'Quit this instance?',
@@ -110,6 +137,10 @@ window.__ModuleLoader__.load({
       unsupported: '当前 dsh-hub 版本不支持保持活跃。',
       keepFailed: '无法读取保持活跃设置。',
       saveFailed: '无法保存设置，请重试。',
+      badgeTitle: '标签页图标',
+      badgeBody: '在页面图标上显示待处理交互、未读完成和正在运行的会话。',
+      badgeOn: '页面图标会跟随会话状态。',
+      badgeOff: '页面图标保持原样。',
       retry: '重试',
       quit: '退出',
       quitDialogTitle: '要退出当前实例吗？',
@@ -315,6 +346,7 @@ window.__ModuleLoader__.load({
         keep: { phase: 'loading', keepAlive: false, busy: false, failed: false },
         quit: 'idle',
         confirmOpen: false,
+        badge: readBadgePref(),
       })
       var current = state[0]
       var setCurrent = state[1]
@@ -327,8 +359,8 @@ window.__ModuleLoader__.load({
       // Tab badge: the same SessionStatus snapshot the sidebar uses.
       var activity = props.useSessionStatus(deriveActivity)
       react.useEffect(function () {
-        paintFavicon(activity)
-      }, [activity])
+        paintFavicon(current.badge ? activity : '')
+      }, [activity, current.badge])
       react.useEffect(function () {
         return function () { paintFavicon('') }
       }, [])
@@ -449,6 +481,22 @@ window.__ModuleLoader__.load({
           : null,
       ] })
 
+      var badgeSection = jsxs('div', { style: section, children: [
+        jsxs('div', { style: row, children: [
+          jsx('div', { style: titleStyle, children: t('badgeTitle') }),
+          jsx(primitives.Switch, {
+            checked: current.badge,
+            label: t('badgeTitle'),
+            onChange: function (next) {
+              writeBadgePref(next)
+              update({ badge: next })
+            },
+          }),
+        ] }),
+        jsx('div', { style: bodyStyle, children: t('badgeBody') }),
+        jsx('div', { style: bodyStyle, children: current.badge ? t('badgeOn') : t('badgeOff') }),
+      ] })
+
       var quitLabel = current.quit === 'closing' ? t('closing')
         : current.quit === 'denied' ? t('reload')
           : current.quit === 'failed' ? t('retry')
@@ -486,6 +534,7 @@ window.__ModuleLoader__.load({
         }),
         children: jsxs('div', { style: stack, children: [
           keepSection,
+          badgeSection,
           current.quit === 'failed' ? jsx('div', { style: bodyStyle, children: t('quitFailed') }) : null,
           current.quit === 'denied' ? jsx('div', { style: bodyStyle, children: t('denied') }) : null,
         ] }),

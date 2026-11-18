@@ -94,6 +94,11 @@ The badge is painted over the existing light/dark favicon (both links are
 updated) and the original href is restored when nothing needs attention. It
 updates from the subscription, with no polling.
 
+The panel's **Tab badge** switch turns the feature off (the original favicon is
+restored immediately). The choice is stored per browser in `localStorage` under
+`dsh-hub-utils.badge` (`on`/`off`, default on); when storage is unavailable the
+switch still applies for the current page.
+
 ## What the browser half needs
 
 The bundle is hand-written in the runtime's dynamic-bundle format

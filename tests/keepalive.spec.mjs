@@ -184,6 +184,7 @@ const baseState = () => ({
   keep: { phase: 'loading', keepAlive: false, busy: false, failed: false },
   quit: 'idle',
   confirmOpen: false,
+  badge: true,
 })
 
 const readyKeep = (keepAlive) => ({ phase: 'ready', keepAlive, busy: false, failed: false })
@@ -406,7 +407,9 @@ test('a hub without the keep-alive route still shows the quit action', () => {
   const state = { ...baseState(), open: true, keep: { phase: 'unsupported', keepAlive: false, busy: false, failed: false } }
   const { render } = mountAction(state)
   const tree = render()
-  assert.equal(find(tree, 'Switch'), undefined)
+  const switches = findAll(tree, 'Switch')
+  assert.equal(switches.find((node) => node.props.label === 'keepTitle'), undefined)
+  assert.ok(switches.find((node) => node.props.label === 'badgeTitle'), 'the badge switch stays available')
   assert.match(text(tree), /unsupported/)
   assert.ok(button(tree, 'quit'))
 })
@@ -825,4 +828,25 @@ test('the tab badge shows only the ring for running and only the dot for attenti
   face.paintFavicon('done', done.doc, done.win)
   assert.ok(done.calls.includes('arc:10'))
   assert.ok(!done.calls.includes('arc:17'))
+})
+
+test('the tab badge switch persists its choice locally', () => {
+  const store = new Map()
+  const previous = globalThis.localStorage
+  globalThis.localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => { store.set(key, value) },
+  }
+  try {
+    const { render, hooks } = mountAction({ ...baseState(), open: true, keep: readyKeep(false) })
+    const badgeSwitch = findAll(render(), 'Switch').find((node) => node.props.label === 'badgeTitle')
+    assert.ok(badgeSwitch, 'the panel offers a tab badge switch')
+    assert.equal(badgeSwitch.props.checked, true, 'the default is on')
+    badgeSwitch.props.onChange(false)
+    assert.equal(hooks.seen.state.badge, false)
+    assert.equal(store.get('dsh-hub-utils.badge'), 'off')
+  } finally {
+    if (previous === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = previous
+  }
 })
