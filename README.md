@@ -48,8 +48,8 @@ stop.
 
 ## Contracts
 
-The browser half talks to two routes over same-origin `fetch`, with the browser's
-cookies attached automatically:
+The browser half talks to these routes over same-origin requests, with the
+browser's cookies attached automatically:
 
 | Route | Owner | Request | Response |
 |---|---|---|---|
@@ -57,6 +57,7 @@ cookies attached automatically:
 | `POST /hub/api/keepalive` | dsh-hub | `{"keepAlive":boolean}`, `content-type: application/json` | the same JSON |
 | `GET /hub/api/session` | dsh-hub | — | `{"authenticated":true,"user":...,"expiresInSec":N}` |
 | `POST /dsh-hub-utils/quit` | this package | header `x-dsh-hub-utils: quit` | `{"ok":true}` |
+| `GET /dsh-hub-utils/download?session=<id>&path=<workspace path>` | this package | — | the file as `content-disposition: attachment` |
 
 The keep-alive route requires an authenticated hub session; the JSON content
 type is the CSRF guard (the session cookie is `SameSite=Lax`, and a cross-site
@@ -67,6 +68,16 @@ The quit route applies dsh's own browser fence through `ctx.connection.admit`
 (plugin routes are not fenced automatically), requires a `POST` carrying the
 custom header (which a cross-site form cannot set), and hands the exit to the
 launcher's `appExit` after the response has flushed.
+
+The download route streams a regular file from the Session's workspace. It
+resolves the requested path below that session's workspace root, refuses
+directories, symlinks, and targets outside the root, and answers with
+`content-disposition: attachment`, so the browser owns the download and shows
+its own progress. It passes the same `ctx.connection.admit` fence as the quit
+route and is registered only for hub-spawned instances. The browser half adds a
+**Download file** button (download icon, "下载文件"/"Download file" tooltip) to the
+document preview's header, in the `sidebar.right.tab.document.actions` slot, and
+hands the browser the route URL; the file never passes through page memory.
 
 ### Session expiry
 
@@ -83,17 +94,18 @@ state, or error messages.
 The bundle is hand-written in the runtime's dynamic-bundle format
 (`window.__ModuleLoader__.load`) and requires only baseline modules: `react`,
 `react/jsx-runtime`, and `@deepseek-ai/dsh-client-ui-primitives`. It registers
-one `sidebar.footer.action` entry with its own locale namespace, so the panel
-follows the app's language and the host row only exists so the package resolves
-in the loader.
+one `sidebar.footer.action` entry and one `sidebar.right.tab.document.actions`
+entry with its own locale namespace, so the panel and the preview button follow
+the app's language and the host row only exists so the package resolves in the
+loader.
 
 The plugin mounts only under dsh-hub: the hub injects `window.__DSH_HUB__` into
 the page it serves and sets `DSH_HUB=1` in the spawned backend's environment.
 Without those markers (a bare `dsh web`) the browser half contributes nothing and
-the host half registers no quit route.
+the host half registers neither the quit nor the download route.
 
 ## Development
 
 ```sh
-npm test        # quit route gates, bundle format, panel registration, and both exchanges
+npm test        # route gates, bundle format, panel and document-header registration, both exchanges
 ```

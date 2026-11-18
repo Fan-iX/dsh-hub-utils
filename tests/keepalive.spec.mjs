@@ -1,7 +1,7 @@
-// Tests for dsh-hub-utils: the host half's quit route, the browser half's
-// sidebar action, and the panel's keep-alive and quit exchanges (including the
-// quit confirmation stacked on top of the panel). The host half imports
-// nothing, so this suite needs no SDK link.
+// Tests for dsh-hub-utils: the host half's quit and download routes, the browser
+// half's sidebar action and document-header download action, and the panel's
+// keep-alive and quit exchanges (including the quit confirmation stacked on top
+// of the panel). The host half imports nothing, so this suite needs no SDK link.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
-  apply as hostApply, id as pluginId, inject as hostInject, QUIT_HEADER, QUIT_PATH,
+  apply as hostApply, DOWNLOAD_PATH, id as pluginId, inject as hostInject, QUIT_HEADER, QUIT_PATH,
 } from '../src/index.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -36,52 +36,92 @@ process.env.DSH_HUB = '1'
 
 // --- the host half ----------------------------------------------------------
 
-/** A response stub recording what the handler wrote, and its `finish` listener. */
+/** A response stub recording status, headers, chunks, and the `finish` listener. */
 const makeRes = () => ({
   status: undefined,
   headers: undefined,
   body: undefined,
   finish: undefined,
-  writeHead(status, headers) { this.status = status; this.headers = headers },
-  end(body) { this.body = body },
+  chunks: [],
+  headersSent: false,
+  writableEnded: false,
+  destroyed: false,
+  writeHead(status, headers) {
+    this.status = status
+    this.headers = headers
+    this.headersSent = true
+  },
+  write(chunk) {
+    this.chunks.push(Buffer.from(chunk))
+    return true
+  },
+  end(body) {
+    if (body !== undefined) this.body = body
+    this.writableEnded = true
+  },
   once(event, listener) { if (event === 'finish') this.finish = listener },
+  on() {},
+  off() {},
+  destroy() { this.destroyed = true },
 })
 
+/** One regular five-byte file behind the filesystem face. */
+const makeFileFs = ({ type = 'file', contained = true, data = [1, 2, 3, 4, 5] } = {}) => ({
+  resolve: async (value) => ({ path: value }),
+  lstat: async () => ({ type }),
+  contains: () => contained,
+  stat: async () => ({ type, size: data.length, version: 'v1' }),
+  readByteRange: async (_target, { offset, length }) => new Uint8Array(data.slice(offset, offset + length)),
+})
+
+/** The registered route at one path. */
+const routeAt = (seen, path) => seen.routes.find((route) => route.path === path)
+
 /**
- * A context stub that records the route, the log, and every exit request.
+ * A context stub that records routes, the log, and every exit request.
  * @param options.appExit - the launcher's exit request, or undefined to model a host without one.
  * @param options.rejection - what `connection.admit` answers; undefined means admitted.
+ * @param options.fs - the filesystem stub; defaults to a readable five-byte file.
+ * @param options.sessions - the session lookup; defaults to no sessions.
  */
-const makeCtx = ({ appExit, rejection } = {}) => {
-  const seen = { route: undefined, exits: [], logs: [], admittances: 0 }
+const makeCtx = ({ appExit, rejection, fs, sessions } = {}) => {
+  const seen = { routes: [], route: undefined, exits: [], logs: [], admittances: 0 }
   seen.ctx = {
     effect: (register) => { register(); return () => {} },
     get: (name) => name === 'appExit' ? appExit : undefined,
     logger: { info: (...args) => { seen.logs.push(args.join(' ')) } },
-    webServer: { register: (route) => { seen.route = route; return () => {} } },
+    webServer: {
+      register: (route) => {
+        seen.routes.push(route)
+        if (seen.route === undefined) seen.route = route
+        return () => {}
+      },
+    },
     connection: {
       admit: () => {
         seen.admittances += 1
         return rejection === undefined ? { peer: 'operator' } : { rejection }
       },
     },
+    fs: fs ?? makeFileFs(),
+    sessions: sessions ?? { get: () => undefined },
+    sandboxPolicy: { workspaceRoot: '/workspace' },
   }
   return seen
 }
 
 test('the host half declares its route and its gates', () => {
   assert.equal(pluginId, 'dsh-hub-utils')
-  assert.deepEqual(hostInject, ['webServer', 'connection'])
+  assert.deepEqual(hostInject, ['webServer', 'connection', 'fs', 'sessions', 'sandboxPolicy'])
   assert.equal(QUIT_PATH, '/dsh-hub-utils/quit')
   assert.equal(QUIT_HEADER, 'x-dsh-hub-utils')
 })
 
-test('the host half mounts one exact route at the exported path', () => {
+test('the host half mounts exact routes at its exported paths', () => {
   const seen = makeCtx()
   hostApply(seen.ctx)
-  assert.equal(seen.route.kind, 'exact')
-  assert.equal(seen.route.path, QUIT_PATH)
-  assert.equal(typeof seen.route.handler, 'function')
+  assert.deepEqual(seen.routes.map((route) => route.path), [QUIT_PATH, DOWNLOAD_PATH])
+  assert.ok(seen.routes.every((route) => route.kind === 'exact' && typeof route.handler === 'function'))
 })
 
 test('a bare dsh web registers no quit route', () => {
@@ -90,7 +130,7 @@ test('a bare dsh web registers no quit route', () => {
   try {
     const seen = makeCtx({ appExit: () => {} })
     hostApply(seen.ctx)
-    assert.equal(seen.route, undefined)
+    assert.deepEqual(seen.routes, [])
   } finally {
     process.env.DSH_HUB = previous
   }
@@ -161,6 +201,82 @@ test('an accepted request answers first, then asks the launcher to exit', async 
   assert.deepEqual(seen.exits, [0])
 })
 
+// --- the download route -----------------------------------------------------
+
+const downloadRequest = (query) => ({
+  method: 'GET',
+  url: `${DOWNLOAD_PATH}?${new URLSearchParams(query).toString()}`,
+  headers: {},
+})
+
+test('an unauthenticated download is refused like every other route', async () => {
+  const seen = makeCtx({ rejection: 401 })
+  hostApply(seen.ctx)
+  const res = makeRes()
+  await routeAt(seen, DOWNLOAD_PATH).handler(downloadRequest({ session: 's1', path: 'a.txt' }), res)
+  assert.equal(res.status, 401)
+  assert.equal(res.chunks.length, 0)
+})
+
+test('a download request outside GET is refused', async () => {
+  const seen = makeCtx()
+  hostApply(seen.ctx)
+  const res = makeRes()
+  await routeAt(seen, DOWNLOAD_PATH).handler({ method: 'POST', url: DOWNLOAD_PATH, headers: {} }, res)
+  assert.equal(res.status, 405)
+  assert.equal(res.headers.allow, 'GET')
+})
+
+test('a download request without a session or path is refused', async () => {
+  const seen = makeCtx()
+  hostApply(seen.ctx)
+  const missingSession = makeRes()
+  await routeAt(seen, DOWNLOAD_PATH).handler(downloadRequest({ path: 'a.txt' }), missingSession)
+  assert.equal(missingSession.status, 400)
+  const missingPath = makeRes()
+  await routeAt(seen, DOWNLOAD_PATH).handler(downloadRequest({ session: 's1' }), missingPath)
+  assert.equal(missingPath.status, 400)
+})
+
+test('an unknown session downloads nothing', async () => {
+  const seen = makeCtx()
+  hostApply(seen.ctx)
+  const res = makeRes()
+  await routeAt(seen, DOWNLOAD_PATH).handler(downloadRequest({ session: 'gone', path: 'a.txt' }), res)
+  assert.equal(res.status, 404)
+})
+
+test('only a regular file inside the session workspace is downloadable', async () => {
+  for (const fs of [
+    makeFileFs({ type: 'directory' }),
+    makeFileFs({ type: 'symlink' }),
+    makeFileFs({ contained: false }),
+  ]) {
+    const seen = makeCtx({ fs, sessions: { get: () => ({ header: { cwd: '/workspace' } }) } })
+    hostApply(seen.ctx)
+    const res = makeRes()
+    await routeAt(seen, DOWNLOAD_PATH).handler(downloadRequest({ session: 's1', path: 'a.txt' }), res)
+    assert.equal(res.status, 404)
+    assert.equal(res.chunks.length, 0)
+  }
+})
+
+test('an admitted download answers as an attachment and streams every byte', async () => {
+  const seen = makeCtx({
+    fs: makeFileFs({ data: [1, 2, 3, 4, 5] }),
+    sessions: { get: (id) => id === 's1' ? { header: { cwd: '/workspace' } } : undefined },
+  })
+  hostApply(seen.ctx)
+  const res = makeRes()
+  await routeAt(seen, DOWNLOAD_PATH).handler(downloadRequest({ session: 's1', path: 'dir/a b.txt' }), res)
+  assert.equal(res.status, 200)
+  assert.equal(res.headers['content-type'], 'application/octet-stream')
+  assert.equal(res.headers['content-length'], '5')
+  assert.match(res.headers['content-disposition'], /^attachment; filename="a b\.txt"; filename\*=UTF-8''a%20b\.txt$/)
+  assert.deepEqual(Buffer.concat(res.chunks), Buffer.from([1, 2, 3, 4, 5]))
+  assert.equal(res.writableEnded, true)
+})
+
 // --- the browser half -------------------------------------------------------
 
 const stubRequire = (specifier) => {
@@ -174,6 +290,7 @@ const stubRequire = (specifier) => {
       Tooltip: 'Tooltip',
       IconQuestionOutlineRegular: 'IconQuestionOutlineRegular',
       IconSlidersTwoOutlineRegular: 'IconSlidersTwoOutlineRegular',
+      IconDownloadOutlineRegular: 'IconDownloadOutlineRegular',
     }
   }
   throw new Error(`the bundle required an undeclared external: ${specifier}`)
@@ -212,15 +329,20 @@ const makeHooks = (initial) => {
 const mountAction = (initial) => {
   const hooks = makeHooks(initial)
   let component
+  let documentAction
   registration.factory((specifier) => (specifier === 'react' ? hooks.react : stubRequire(specifier))).apply({
     locale: { register: () => () => {} },
     effect: (register) => { register(); return () => {} },
     slots: {
       inject: (name, contribute) => contribute(),
-      register: (options, value) => { component = value; return () => {} },
+      register: (options, value) => {
+        if (options.name === 'sidebar.right.tab.document.actions') documentAction = value
+        else component = value
+        return () => {}
+      },
     },
   })
-  return { component, hooks, render: (props = {}) => component({ t: (key) => key, wide: true, ...props }) }
+  return { component, hooks, documentAction, render: (props = {}) => component({ t: (key) => key, wide: true, ...props }) }
 }
 
 /** Visit every element node in a render tree, including a modal's footer prop. */
@@ -267,6 +389,7 @@ test('the manifest declares a web client half alongside the host half', () => {
   assert.deepEqual(pkg.dsh.client.inject, [
     '@deepseek-ai/dsh-client-locale',
     '@deepseek-ai/dsh-client-ui-sidebar',
+    '@deepseek-ai/dsh-client-ui-sidebar-documentpreview',
   ])
 })
 
@@ -280,7 +403,7 @@ test('the bundle registers its own id and requires only baseline externals', () 
   }
 })
 
-test('the browser half mounts one action at the sidebar foot', () => {
+test('the browser half mounts the sidebar action and the document download action', () => {
   const registrations = []
   const face = registration.factory(stubRequire)
   face.apply({
@@ -291,10 +414,13 @@ test('the browser half mounts one action at the sidebar foot', () => {
       register: (options, component) => { registrations.push({ options, component }); return () => {} },
     },
   })
-  assert.equal(registrations.length, 1)
-  assert.equal(registrations[0].options.name, 'sidebar.footer.action')
-  assert.equal(registrations[0].options.id, 'dsh-hub-utils')
-  assert.equal(registrations[0].options.locale, 'settings.dshHubUtils')
+  assert.equal(registrations.length, 2)
+  const sidebar = registrations.find((entry) => entry.options.name === 'sidebar.footer.action')
+  const documentAction = registrations.find((entry) => entry.options.name === 'sidebar.right.tab.document.actions')
+  assert.equal(sidebar.options.id, 'dsh-hub-utils')
+  assert.equal(sidebar.options.locale, 'settings.dshHubUtils')
+  assert.equal(documentAction.options.id, 'dsh-hub-utils')
+  assert.equal(documentAction.options.locale, 'settings.dshHubUtils')
   assert.deepEqual(face.inject, ['slots', 'locale'])
 })
 
@@ -732,5 +858,39 @@ test('disposing the session watcher clears the timer and the listeners', async (
     assert.equal(seen.documentListeners.visibilitychange, undefined)
   } finally {
     timers.restore()
+  }
+})
+
+// --- the document download action ------------------------------------------
+
+test('the document preview header offers a downloadable file', () => {
+  const { documentAction } = mountAction(baseState())
+  assert.ok(documentAction, 'a document action is registered')
+
+  const clicked = []
+  const previous = globalThis.document
+  globalThis.document = {
+    body: { appendChild() {} },
+    createElement: () => ({
+      href: '',
+      download: '',
+      rel: '',
+      click() { clicked.push(this.href) },
+    }),
+  }
+  try {
+    const tree = documentAction({ t: (key) => key, sessionId: 's1', absolutePath: '/workspace/dir/a b.txt' })
+    const tooltip = find(tree, 'Tooltip')
+    assert.equal(tooltip.props.label, 'downloadFile')
+    assert.equal(tooltip.props.side, 'bottom')
+    const button = find(tree, 'button')
+    assert.equal(button.props['aria-label'], 'downloadFile')
+    assert.equal(button.props.className, 'dsh-hub-utils-download')
+    assert.equal(button.props.children.type, 'IconDownloadOutlineRegular')
+    button.props.onClick()
+    assert.deepEqual(clicked, ['/dsh-hub-utils/download?session=s1&path=%2Fworkspace%2Fdir%2Fa%20b.txt'])
+  } finally {
+    if (previous === undefined) delete globalThis.document
+    else globalThis.document = previous
   }
 })

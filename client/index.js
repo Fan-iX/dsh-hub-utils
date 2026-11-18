@@ -46,6 +46,9 @@ window.__ModuleLoader__.load({
     var QUIT_PATH = '/dsh-hub-utils/quit'
     var QUIT_HEADER = 'x-dsh-hub-utils'
 
+    /** The host route that streams one workspace file; see `src/index.js`. */
+    var DOWNLOAD_PATH = '/dsh-hub-utils/download'
+
     /** How long the page waits for the instance to leave before reloading into a new one. */
     var RELOAD_AFTER_MS = 3000
 
@@ -71,6 +74,7 @@ window.__ModuleLoader__.load({
       unsupported: 'Keep-alive is not available on this dsh-hub build.',
       keepFailed: 'Could not read the keep-alive setting.',
       saveFailed: 'Could not save the setting. Try again.',
+      downloadFile: 'Download file',
       retry: 'Retry',
       quit: 'Quit',
       quitDialogTitle: 'Quit this instance?',
@@ -97,6 +101,7 @@ window.__ModuleLoader__.load({
       unsupported: '当前 dsh-hub 版本不支持保持活跃。',
       keepFailed: '无法读取保持活跃设置。',
       saveFailed: '无法保存设置，请重试。',
+      downloadFile: '下载文件',
       retry: '重试',
       quit: '退出',
       quitDialogTitle: '要退出当前实例吗？',
@@ -346,6 +351,10 @@ window.__ModuleLoader__.load({
         // variant/hover rules, so the red fill survives the ghost variant.
         '.dsh-hub-utils-danger.dsh-hub-utils-danger { background: var(--dsw-static-red-600, #ec1313); color: #fff; }',
         '.dsh-hub-utils-danger.dsh-hub-utils-danger:hover { background: color-mix(in srgb, var(--dsw-static-red-600, #ec1313) 86%, #000); }',
+        // Same geometry and hover token as the preview toolbar's own buttons.
+        '.dsh-hub-utils-download { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 6px; color: var(--dsw-alias-label-secondary); line-height: 1; background: transparent; border: none; border-radius: var(--dsw-radius-sm); cursor: pointer; }',
+        '.dsh-hub-utils-download svg { width: 15px; height: 15px; }',
+        '@media (hover: hover) { .dsh-hub-utils-download:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); } }',
       ].join('\n')
       document.head.appendChild(style)
       return function () { style.remove() }
@@ -459,6 +468,49 @@ window.__ModuleLoader__.load({
      * Mount the sidebar action and its dictionaries, but only under dsh-hub.
      * @param ctx - the browser plugin context.
      */
+    /** The download route URL for one workspace file. */
+    function downloadUrl(sessionId, filePath) {
+      return DOWNLOAD_PATH + '?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(filePath)
+    }
+
+    /** Hand the URL to the browser's native downloader. */
+    function startDownload(url) {
+      if (typeof document === 'undefined') return
+      var link = document.createElement('a')
+      link.href = url
+      link.download = ''
+      link.rel = 'noopener'
+      if (document.body) document.body.appendChild(link)
+      link.click()
+      if (link.parentNode) link.parentNode.removeChild(link)
+    }
+
+    /**
+     * The download button in the file preview header.
+     * @param props - the session, the file's absolute path, and the locale seat.
+     * @returns the icon button with its tooltip.
+     */
+    function DownloadDocumentAction(props) {
+      var label = props.t('downloadFile')
+      var download = function () {
+        if (typeof props.sessionId !== 'string' || typeof props.absolutePath !== 'string') return
+        if (props.absolutePath === '') return
+        startDownload(downloadUrl(props.sessionId, props.absolutePath))
+      }
+      return jsx(primitives.Tooltip, {
+        label: label,
+        side: 'bottom',
+        delayMs: 500,
+        children: jsx('button', {
+          type: 'button',
+          className: 'dsh-hub-utils-download',
+          'aria-label': label,
+          children: jsx(primitives.IconDownloadOutlineRegular, {}),
+          onClick: download,
+        }),
+      })
+    }
+
     function apply(ctx) {
       if (!isDshHub()) return
       ctx.effect(startSessionWatch, 'dsh-hub-utils: session watch')
@@ -473,6 +525,15 @@ window.__ModuleLoader__.load({
           }, HubPanelAction)
         })
       }, 'dsh-hub-utils: sidebar action')
+      ctx.effect(function () {
+        return ctx.slots.inject('sidebar.right.tab.document.actions', function () {
+          return ctx.slots.register({
+            name: 'sidebar.right.tab.document.actions',
+            id: 'dsh-hub-utils',
+            locale: NS,
+          }, DownloadDocumentAction)
+        })
+      }, 'dsh-hub-utils: download action')
     }
 
     exports.NS = NS
@@ -481,6 +542,8 @@ window.__ModuleLoader__.load({
     exports.QUIT_HEADER = QUIT_HEADER
     exports.SESSION_PATH = SESSION_PATH
     exports.LOGIN_PATH = LOGIN_PATH
+    exports.DOWNLOAD_PATH = DOWNLOAD_PATH
+    exports.downloadUrl = downloadUrl
     exports.startSessionWatch = startSessionWatch
     exports.apply = apply
     exports.inject = ['slots', 'locale']
