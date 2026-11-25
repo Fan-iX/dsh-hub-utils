@@ -1,7 +1,7 @@
 {
   "name": "dsh-hub-utils",
   "version": "0.1.0",
-  "description": "dsh-hub controls inside the dsh web UI: keep this instance running when idle, or quit it.",
+  "description": "dsh-hub controls inside the dsh web UI: keep this instance running when idle, restart it, and sign out of the hub.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {

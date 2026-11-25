@@ -6,14 +6,16 @@ current instance:
 - **Keep this instance running** — asks
   [dsh-hub](https://github.com/Fan-iX/dsh-hub) not to reap the instance when idle,
   so closing the page no longer ends it.
-- **Quit this instance** — asks the launcher for a bounded exit (`appExit`, the
-  same path `dsh web` takes on `SIGTERM`), so the tree is disposed and the
-  session log is flushed. Under dsh-hub, the next request spawns a fresh
-  instance.
+- **Restart this instance** — asks the launcher for a bounded exit (`appExit`,
+  the same path `dsh web` takes on `SIGTERM`), so the tree is disposed and the
+  session log is flushed. The footer button reloads after the exit.
+- **Sign out** — asks dsh-hub's `/hub/logout` route, which clears the HttpOnly
+  session cookie and redirects to the login page. It does not stop the instance,
+  so the next account can take over the running backend.
 
-The panel replaces the separate `dsh-quit` button for the quit function: install
-this package and remove `dsh-quit` if it was installed before, so the sidebar
-shows one entry rather than two.
+The panel replaces the separate `dsh-quit` button for the restart function:
+install this package and remove `dsh-quit` if it was installed before, so the
+sidebar shows one entry rather than two.
 
 ## Install
 
@@ -33,18 +35,21 @@ The sidebar foot gains a sliders button labelled **dsh-hub**. It opens a dialog:
    dialog); the on/off caption stays under the switch. The panel reads the real
    state from the hub when it opens, so a reload shows the truth rather than a
    guessed default. The switch resets to off when the instance is replaced.
-2. **Quit** — a filled red footer button with white text, taking the seat the old
-   Close button used (the header close button is now the only close). It opens a
-   **second dialog on top of the panel** (Cancel / a red Quit) whose title is
-   bold. Escape, the mask, or five seconds without an answer dismiss it;
-   confirming posts the quit request, and the page reloads into a fresh instance
-   after a short delay. dsh's modal layer stacks dialogs and gives the top one
-   Escape and focus, so the panel underneath stays put.
+2. **Restart** — a filled red footer button with white text, taking the seat
+   the old Close button used (the header close button is now the only close).
+   It opens a **second dialog on top of the panel** (Cancel / a red Restart)
+   whose title is bold. Escape, the mask, or five seconds without an answer
+   dismiss it; confirming posts the exit request, and the page reloads after a
+   short delay. dsh's modal layer stacks dialogs and gives the top one Escape
+   and focus, so the panel underneath stays put.
+3. **Sign out** — an outlined red footer button to the left of Restart. It
+   navigates to dsh-hub's `/hub/logout` route; the hub clears the session cookie
+   and redirects to `/hub/login` while the instance keeps running.
 
 Keep-alive only appears under dsh-hub: a bare `dsh web` answers the hub route
-with a non-JSON response, and the panel says so. Quit works under any launcher
-that provides `appExit`; without one it fails loudly instead of pretending to
-stop.
+with a non-JSON response, and the panel says so. Restart works under any
+launcher that provides `appExit`; without one it fails loudly instead of
+pretending to stop.
 
 ## Contracts
 
@@ -56,6 +61,7 @@ browser's cookies attached automatically:
 | `GET /hub/api/keepalive` | dsh-hub | — | `{"keepAlive":boolean,"running":boolean}` |
 | `POST /hub/api/keepalive` | dsh-hub | `{"keepAlive":boolean}`, `content-type: application/json` | the same JSON |
 | `GET /hub/api/session` | dsh-hub | — | `{"authenticated":true,"user":...,"expiresInSec":N}` |
+| `GET /hub/logout` | dsh-hub | — | `303 /hub/login`, expired session cookie |
 | `POST /dsh-hub-utils/quit` | this package | header `x-dsh-hub-utils: quit` | `{"ok":true}` |
 | `GET /dsh-hub-utils/download?session=<id>&path=<workspace path>` | this package | — | the file as `content-disposition: attachment` |
 
@@ -64,7 +70,7 @@ type is the CSRF guard (the session cookie is `SameSite=Lax`, and a cross-site
 form cannot send `application/json` without a preflight). The flag lives on the
 hub's per-user backend object, so it applies to the current instance only.
 
-The quit route applies dsh's own browser fence through `ctx.connection.admit`
+The exit route (used by Restart) applies dsh's own browser fence through `ctx.connection.admit`
 (plugin routes are not fenced automatically), requires a `POST` carrying the
 custom header (which a cross-site form cannot set), and hands the exit to the
 launcher's `appExit` after the response has flushed.
@@ -73,7 +79,7 @@ The download route streams a regular file from the Session's workspace. It
 resolves the requested path below that session's workspace root, refuses
 directories, symlinks, and targets outside the root, and answers with
 `content-disposition: attachment`, so the browser owns the download and shows
-its own progress. It passes the same `ctx.connection.admit` fence as the quit
+its own progress. It passes the same `ctx.connection.admit` fence as the exit
 route and is registered only for hub-spawned instances. The browser half adds a
 **Download file** button (download icon, "下载文件"/"Download file" tooltip) to the
 document preview's header, in the `sidebar.right.tab.document.actions` slot, and
@@ -102,7 +108,7 @@ loader.
 The plugin mounts only under dsh-hub: the hub injects `window.__DSH_HUB__` into
 the page it serves and sets `DSH_HUB=1` in the spawned backend's environment.
 Without those markers (a bare `dsh web`) the browser half contributes nothing and
-the host half registers neither the quit nor the download route.
+the host half registers neither the exit nor the download route.
 
 ## Development
 

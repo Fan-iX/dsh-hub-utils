@@ -1,10 +1,13 @@
 // Browser half of dsh-hub-utils: one sidebar action that opens a small control
-// panel for the current instance. The panel carries two actions:
+// panel for the current instance. The panel carries these actions:
 //
 //   - Keep alive: asks dsh-hub not to reap this instance while the page is
 //     closed (the hub's /hub/api/keepalive route).
-//   - Quit: asks the host launcher for a bounded exit (this package's own
-//     /dsh-hub-utils/quit route, served by the host half).
+//   - Restart: asks the host launcher for a bounded exit (this package's own
+//     /dsh-hub-utils/quit route, served by the host half), then reloads.
+//   - Sign out: asks dsh-hub's /hub/logout route, which clears the HttpOnly
+//     session cookie and redirects to the login page without stopping the
+//     instance.
 //
 // Hand-written rather than built — the `clientBundle` tsdown preset is not part
 // of the published SDK, so this file is already in the runtime's dynamic-bundle
@@ -40,9 +43,10 @@ window.__ModuleLoader__.load({
      */
     var SESSION_PATH = '/hub/api/session'
     var LOGIN_PATH = '/hub/login'
+    var LOGOUT_PATH = '/hub/logout'
     var EXPIRY_MARGIN_MS = 2000
 
-    /** The host half's quit route and its required header; see `src/index.js`. */
+    /** The host half's exit route and its required header; see `src/index.js`. */
     var QUIT_PATH = '/dsh-hub-utils/quit'
     var QUIT_HEADER = 'x-dsh-hub-utils'
 
@@ -52,7 +56,7 @@ window.__ModuleLoader__.load({
     /** How long the page waits for the instance to leave before reloading into a new one. */
     var RELOAD_AFTER_MS = 3000
 
-    /** How long the quit confirmation waits before dismissing itself untouched. */
+    /** How long the restart confirmation waits before dismissing itself untouched. */
     var CONFIRM_WINDOW_MS = 5000
 
     var stack = { display: 'flex', flexDirection: 'column', gap: '20px' }
@@ -76,13 +80,14 @@ window.__ModuleLoader__.load({
       saveFailed: 'Could not save the setting. Try again.',
       downloadFile: 'Download file',
       retry: 'Retry',
-      quit: 'Quit',
-      quitDialogTitle: 'Quit this instance?',
-      quitDialogBody: 'The instance exits. Unsaved work in running tasks is lost.',
-      quitConfirmAction: 'Quit',
+      logout: 'Sign out',
+      restart: 'Restart',
+      restartDialogTitle: 'Restart this instance?',
+      restartDialogBody: 'The instance exits. The page reloads to the sign-in page; sign in again to start a fresh instance. Unsaved work in running tasks is lost.',
+      restartConfirmAction: 'Restart',
       cancel: 'Cancel',
-      closing: 'Quitting…',
-      quitFailed: 'The quit request failed.',
+      restarting: 'Restarting…',
+      restartFailed: 'The restart request failed.',
       denied: 'Session expired. Reload to sign in again.',
       reload: 'Reload',
       close: 'Close',
@@ -103,13 +108,14 @@ window.__ModuleLoader__.load({
       saveFailed: '无法保存设置，请重试。',
       downloadFile: '下载文件',
       retry: '重试',
-      quit: '退出',
-      quitDialogTitle: '要退出当前实例吗？',
-      quitDialogBody: '实例会退出。正在运行的任务中未保存的内容会丢失。',
-      quitConfirmAction: '确认退出',
+      logout: '注销',
+      restart: '重启',
+      restartDialogTitle: '要重启当前实例吗？',
+      restartDialogBody: '实例会退出，页面刷新后回到登录页；重新登录后会启动一个全新的实例。正在运行的任务中未保存的内容会丢失。',
+      restartConfirmAction: '重启',
       cancel: '取消',
-      closing: '正在退出…',
-      quitFailed: '退出请求失败。',
+      restarting: '正在重启…',
+      restartFailed: '重启请求失败。',
       denied: '会话已失效，请刷新后重新登录。',
       reload: '刷新',
       close: '关闭',
@@ -144,7 +150,7 @@ window.__ModuleLoader__.load({
       var state = react.useState({
         open: false,
         keep: { phase: 'loading', keepAlive: false, busy: false, failed: false },
-        quit: 'idle',
+        restart: 'idle',
         confirmOpen: false,
       })
       var current = state[0]
@@ -206,8 +212,8 @@ window.__ModuleLoader__.load({
         })
       }
 
-      var quit = function () {
-        update({ quit: 'closing' })
+      var restart = function () {
+        update({ restart: 'closing' })
         var headers = {}
         headers[QUIT_HEADER] = 'quit'
         fetch(QUIT_PATH, { method: 'POST', headers: headers, cache: 'no-store' })
@@ -221,14 +227,20 @@ window.__ModuleLoader__.load({
             setTimeout(function () { window.location.reload() }, RELOAD_AFTER_MS)
           })
           .catch(function (error) {
-            update({ quit: error && error.refused === true ? 'denied' : 'failed', confirmOpen: false })
+            update({ restart: error && error.refused === true ? 'denied' : 'failed', confirmOpen: false })
           })
       }
 
-      var openConfirm = function () { update({ confirmOpen: true, quit: 'idle' }) }
+      var openRestartConfirm = function () { update({ confirmOpen: true, restart: 'idle' }) }
       var cancelConfirm = function () { update({ confirmOpen: false }) }
-      var close = function () { update({ open: false, quit: 'idle', confirmOpen: false }) }
+      var close = function () { update({ open: false, restart: 'idle', confirmOpen: false }) }
       var open = function () { update({ open: true }) }
+
+      // dsh-hub owns the HttpOnly session cookie; its logout route clears it
+      // and redirects to /hub/login without touching this instance.
+      var logout = function () {
+        window.location.assign(LOGOUT_PATH)
+      }
 
       var keep = current.keep
       var keepCaption = keep.phase === 'loading' ? t('loading')
@@ -271,13 +283,13 @@ window.__ModuleLoader__.load({
           : null,
       ] })
 
-      var quitLabel = current.quit === 'closing' ? t('closing')
-        : current.quit === 'denied' ? t('reload')
-          : current.quit === 'failed' ? t('retry')
-            : t('quit')
-      var quitClick = current.quit === 'denied'
+      var restartLabel = current.restart === 'closing' ? t('restarting')
+        : current.restart === 'denied' ? t('reload')
+          : current.restart === 'failed' ? t('retry')
+            : t('restart')
+      var restartClick = current.restart === 'denied'
         ? function () { window.location.reload() }
-        : openConfirm
+        : openRestartConfirm
 
       var button = jsx(primitives.Button, {
         key: 'action',
@@ -291,36 +303,50 @@ window.__ModuleLoader__.load({
         onClick: open,
         children: wide ? t('action') : null,
       })
+      var logoutButton = jsx(primitives.Button, {
+        key: 'logout',
+        variant: 'outline',
+        size: 'md',
+        className: 'dsh-hub-utils-danger-outline',
+        onClick: logout,
+        children: t('logout'),
+      })
+      var restartButton = jsx(primitives.Button, {
+        key: 'restart',
+        variant: 'ghost',
+        size: 'md',
+        className: 'dsh-hub-utils-danger',
+        disabled: current.restart === 'closing',
+        onClick: restartClick,
+        children: restartLabel,
+      })
       var panel = jsxs(primitives.Modal, {
         key: 'panel',
         open: current.open,
         onClose: close,
         title: t('panelTitle'),
         closeLabel: t('close'),
-        // The quit action takes the footer seat, styled like the removed close
-        // button but in the theme's error colour; the header close button closes.
-        footer: jsx(primitives.Button, {
-          variant: 'ghost',
-          className: 'dsh-hub-utils-danger',
-          disabled: current.quit === 'closing',
-          onClick: quitClick,
-          children: quitLabel,
+        // Sign out, then Restart; both use the dialog's control height. The
+        // header close button closes.
+        footer: jsxs('div', {
+          style: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px', width: '100%' },
+          children: [logoutButton, restartButton],
         }),
         children: jsxs('div', { style: stack, children: [
           keepSection,
-          current.quit === 'failed' ? jsx('div', { style: bodyStyle, children: t('quitFailed') }) : null,
-          current.quit === 'denied' ? jsx('div', { style: bodyStyle, children: t('denied') }) : null,
+          current.restart === 'failed' ? jsx('div', { style: bodyStyle, children: t('restartFailed') }) : null,
+          current.restart === 'denied' ? jsx('div', { style: bodyStyle, children: t('denied') }) : null,
         ] }),
       })
       // A second dialog on top of the panel; the modal layer stacks it, gives it
       // Escape and focus, and returns focus to the panel when it closes.
       var confirmDialog = jsxs(primitives.Modal, {
-        key: 'quit-confirm',
+        key: 'restart-confirm',
         className: 'dsh-hub-utils-confirm',
         open: current.confirmOpen,
         onClose: cancelConfirm,
-        title: t('quitDialogTitle'),
-        description: t('quitDialogBody'),
+        title: t('restartDialogTitle'),
+        description: t('restartDialogBody'),
         closeLabel: t('cancel'),
         footer: [
           jsx(primitives.Button, { key: 'cancel', variant: 'ghost', onClick: cancelConfirm, children: t('cancel') }),
@@ -328,9 +354,9 @@ window.__ModuleLoader__.load({
             key: 'confirm',
             variant: 'ghost',
             className: 'dsh-hub-utils-danger',
-            disabled: current.quit === 'closing',
-            onClick: quit,
-            children: current.quit === 'closing' ? t('closing') : t('quitConfirmAction'),
+            disabled: current.restart === 'closing',
+            onClick: restart,
+            children: current.restart === 'closing' ? t('restarting') : t('restartConfirmAction'),
           }),
         ],
       })
@@ -338,7 +364,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * dsh-hub-utils styles: the quit confirmation's title is bold, which the
+     * dsh-hub-utils styles: the restart confirmation's title is bold, which the
      * shell's default modal title is not. Scoped to the dialog class passed in.
      * @returns a disposer removing the injected rule.
      */
@@ -351,6 +377,10 @@ window.__ModuleLoader__.load({
         // variant/hover rules, so the red fill survives the ghost variant.
         '.dsh-hub-utils-danger.dsh-hub-utils-danger { background: var(--dsw-static-red-600, #ec1313); color: #fff; }',
         '.dsh-hub-utils-danger.dsh-hub-utils-danger:hover { background: color-mix(in srgb, var(--dsw-static-red-600, #ec1313) 86%, #000); }',
+        // Outlined danger button for Sign out: the primitive's outline stroke
+        // token and label are the theme's red, with a matching tint on hover.
+        '.dsh-hub-utils-danger-outline.dsh-hub-utils-danger-outline { --dsh-button-outline-color: var(--dsw-static-red-600, #ec1313); color: var(--dsw-static-red-600, #ec1313); }',
+        '@media (hover: hover) { .dsh-hub-utils-danger-outline.dsh-hub-utils-danger-outline:hover:not(:disabled) { background: color-mix(in srgb, var(--dsw-static-red-600, #ec1313) 12%, transparent); } }',
         // Same geometry and hover token as the preview toolbar's own buttons.
         '.dsh-hub-utils-download { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 6px; color: var(--dsw-alias-label-secondary); line-height: 1; background: transparent; border: none; border-radius: var(--dsw-radius-sm); cursor: pointer; }',
         '.dsh-hub-utils-download svg { width: 15px; height: 15px; }',
@@ -542,6 +572,7 @@ window.__ModuleLoader__.load({
     exports.QUIT_HEADER = QUIT_HEADER
     exports.SESSION_PATH = SESSION_PATH
     exports.LOGIN_PATH = LOGIN_PATH
+    exports.LOGOUT_PATH = LOGOUT_PATH
     exports.DOWNLOAD_PATH = DOWNLOAD_PATH
     exports.downloadUrl = downloadUrl
     exports.startSessionWatch = startSessionWatch

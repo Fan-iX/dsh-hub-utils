@@ -1,7 +1,8 @@
-// Tests for dsh-hub-utils: the host half's quit and download routes, the browser
+// Tests for dsh-hub-utils: the host half's exit and download routes, the browser
 // half's sidebar action and document-header download action, and the panel's
-// keep-alive and quit exchanges (including the quit confirmation stacked on top
-// of the panel). The host half imports nothing, so this suite needs no SDK link.
+// keep-alive, restart, and sign-out exchanges (including the restart
+// confirmation stacked on top of the panel). The host half imports nothing, so
+// this suite needs no SDK link.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -299,7 +300,7 @@ const stubRequire = (specifier) => {
 const baseState = () => ({
   open: false,
   keep: { phase: 'loading', keepAlive: false, busy: false, failed: false },
-  quit: 'idle',
+  restart: 'idle',
   confirmOpen: false,
 })
 
@@ -459,7 +460,7 @@ test('the action shows the panel icon, its label only when wide, and opens the p
   assert.equal(button(render({ wide: false }), 'action'), undefined, 'the 56px rail shows the icon alone')
 })
 
-test('the panel carries the keep-alive and quit controls', () => {
+test('the panel carries the keep-alive, sign-out, and restart controls', () => {
   const { render } = mountAction({ ...baseState(), open: true, keep: readyKeep(true) })
   const tree = render()
   const panel = dialogs(tree)[0]
@@ -470,10 +471,17 @@ test('the panel carries the keep-alive and quit controls', () => {
   assert.match(text(tree), /keepOn/, 'the on/off caption survives')
   assert.equal(button(tree, 'close'), undefined, 'the footer close button is gone')
 
-  const quit = button(tree, 'quit')
-  assert.ok(quit, 'the quit action takes the footer seat')
-  assert.equal(quit.props.variant, 'ghost', "the badge geometry stays the primitive's")
-  assert.equal(quit.props.className, 'dsh-hub-utils-danger', 'filled red with white text')
+  const logout = button(tree, 'logout')
+  assert.ok(logout, 'sign out sits left of restart')
+  assert.equal(logout.props.variant, 'outline', 'the DSH outline variant')
+  assert.equal(logout.props.size, 'md', 'matches the confirmation dialog height')
+  assert.equal(logout.props.className, 'dsh-hub-utils-danger-outline', 'outlined in the theme red')
+
+  const restart = button(tree, 'restart')
+  assert.ok(restart, 'the restart action takes the footer seat')
+  assert.equal(restart.props.variant, 'ghost', "the badge geometry stays the primitive's")
+  assert.equal(restart.props.size, 'md', 'matches the confirmation dialog height')
+  assert.equal(restart.props.className, 'dsh-hub-utils-danger', 'filled red')
 
   const help = find(tree, 'Tooltip')
   assert.ok(help, 'the explanation moves into a tooltip')
@@ -528,18 +536,18 @@ test('opening the panel reads the keep-alive state from the hub', async () => {
   assert.equal(hooks.seen.state.keep.keepAlive, true)
 })
 
-test('a hub without the keep-alive route still shows the quit action', () => {
+test('a hub without the keep-alive route still shows the restart action', () => {
   const state = { ...baseState(), open: true, keep: { phase: 'unsupported', keepAlive: false, busy: false, failed: false } }
   const { render } = mountAction(state)
   const tree = render()
   assert.equal(find(tree, 'Switch'), undefined)
   assert.match(text(tree), /unsupported/)
-  assert.ok(button(tree, 'quit'))
+  assert.ok(button(tree, 'restart'))
 })
 
-test('the quit action opens a second dialog stacked above the panel', () => {
+test('the restart action opens a second dialog stacked above the panel', () => {
   const { render, hooks } = mountAction({ ...baseState(), open: true, keep: readyKeep(false) })
-  button(render(), 'quit').props.onClick()
+  button(render(), 'restart').props.onClick()
   assert.equal(hooks.seen.state.confirmOpen, true)
 
   const stack = dialogs(render())
@@ -547,17 +555,18 @@ test('the quit action opens a second dialog stacked above the panel', () => {
   assert.equal(stack[0].props.open, true, 'the panel stays open underneath')
   assert.equal(stack[1].props.open, true)
   assert.equal(stack[1].props.className, 'dsh-hub-utils-confirm')
-  assert.equal(stack[1].props.title, 'quitDialogTitle')
-  assert.equal(stack[1].props.description, 'quitDialogBody')
+  assert.equal(stack[1].props.title, 'restartDialogTitle')
+  assert.equal(stack[1].props.description, 'restartDialogBody')
   const [cancel, confirm] = stack[1].props.footer
   assert.equal(cancel.props.children, 'cancel')
-  assert.equal(confirm.props.children, 'quitConfirmAction')
+  assert.equal(confirm.props.children, 'restartConfirmAction')
   assert.equal(confirm.props.className, 'dsh-hub-utils-danger', 'both danger buttons share the red fill')
 })
 
-test('the confirmation title is bold and the danger buttons are filled red', () => {
+test('the confirmation title is bold and the danger controls use the theme red', () => {
   assert.match(source, /\.dsh-hub-utils-confirm h2 \{ font-weight: 700; \}/)
   assert.match(source, /\.dsh-hub-utils-danger\.dsh-hub-utils-danger \{ background: var\(--dsw-static-red-600, #ec1313\); color: #fff; \}/)
+  assert.match(source, /\.dsh-hub-utils-danger-outline\.dsh-hub-utils-danger-outline \{ --dsh-button-outline-color: var\(--dsw-static-red-600, #ec1313\); color: var\(--dsw-static-red-600, #ec1313\); \}/)
   const seen = mountAction(baseState())
   assert.ok(seen.component)
 })
@@ -566,7 +575,7 @@ test('cancelling or Escape on the confirmation leaves the panel untouched', () =
   const { render, hooks } = mountAction({ ...baseState(), open: true, keep: readyKeep(false), confirmOpen: true })
   dialogs(render())[1].props.footer[0].props.onClick()
   assert.equal(hooks.seen.state.confirmOpen, false)
-  assert.equal(hooks.seen.state.quit, 'idle')
+  assert.equal(hooks.seen.state.restart, 'idle')
   assert.equal(hooks.seen.state.open, true, 'the panel is still open')
 
   dialogs(render())[1].props.onClose()
@@ -585,7 +594,7 @@ test('an untouched confirmation dismisses itself after the window', (t) => {
   assert.equal(hooks.seen.state.confirmOpen, false, 'five idle seconds close it')
 })
 
-test('confirming the dialog posts the quit request and keeps the dialog while closing', async () => {
+test('confirming the dialog posts the restart request and keeps the dialog while closing', async () => {
   const calls = []
   const reloads = []
   globalThis.window = {
@@ -606,30 +615,50 @@ test('confirming the dialog posts the quit request and keeps the dialog while cl
   assert.equal(calls[0].url, '/dsh-hub-utils/quit')
   assert.equal(calls[0].init.method, 'POST')
   assert.equal(calls[0].init.headers['x-dsh-hub-utils'], 'quit')
-  assert.equal(hooks.seen.state.quit, 'closing')
+  assert.equal(hooks.seen.state.restart, 'closing')
   assert.equal(hooks.seen.state.confirmOpen, true, 'the dialog shows the closing state')
   assert.deepEqual(reloads, [], 'the reload waits for the instance to leave')
 })
 
-test('a refused quit closes the dialog and asks for a reload', async () => {
+test('a refused restart closes the dialog and asks for a reload', async () => {
   globalThis.fetch = () => Promise.resolve({ ok: false, status: 401 })
   const { render, hooks } = mountAction({ ...baseState(), open: true, keep: readyKeep(false), confirmOpen: true })
   dialogs(render())[1].props.footer[1].props.onClick()
   await tick()
-  assert.equal(hooks.seen.state.quit, 'denied')
+  assert.equal(hooks.seen.state.restart, 'denied')
   assert.equal(hooks.seen.state.confirmOpen, false)
   assert.ok(button(render(), 'reload'))
 })
 
-test('a failed quit closes the dialog and offers retry', async () => {
+test('a failed restart closes the dialog and offers retry', async () => {
   globalThis.fetch = () => Promise.resolve({ ok: false, status: 500 })
   const { render, hooks } = mountAction({ ...baseState(), open: true, keep: readyKeep(false), confirmOpen: true })
   dialogs(render())[1].props.footer[1].props.onClick()
   await tick()
-  assert.equal(hooks.seen.state.quit, 'failed')
+  assert.equal(hooks.seen.state.restart, 'failed')
   assert.equal(hooks.seen.state.confirmOpen, false)
-  assert.match(text(render()), /quitFailed/)
+  assert.match(text(render()), /restartFailed/)
   assert.ok(button(render(), 'retry'))
+})
+
+test('sign out visits the hub logout route without contacting the host', () => {
+  const oldWindow = globalThis.window
+  const oldFetch = globalThis.fetch
+  const assignments = []
+  globalThis.window = {
+    __ModuleLoader__: oldWindow.__ModuleLoader__,
+    __DSH_HUB__: { version: 1 },
+    location: { assign: (url) => { assignments.push(url) } },
+  }
+  globalThis.fetch = () => { throw new Error('sign out must not fetch') }
+  try {
+    const { render } = mountAction({ ...baseState(), open: true, keep: readyKeep(false) })
+    button(render(), 'logout').props.onClick()
+    assert.deepEqual(assignments, ['/hub/logout'])
+  } finally {
+    globalThis.window = oldWindow
+    globalThis.fetch = oldFetch
+  }
 })
 
 // --- the session watcher ----------------------------------------------------
